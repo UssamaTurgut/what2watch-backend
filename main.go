@@ -15,23 +15,21 @@ import (
 	"github.com/pocketbase/pocketbase/models"
 )
 
-type Movies struct {
-	id      string
-	title   string
-	banners string
-	year    string
-	posters string
-	url     string
-	genres  string
+type Movie struct {
+	ID      string
+	Title   string
+	Banners string
+	Year    string
+	Posters string
+	Url     string
+	Genres  string
 }
 
 type Watchlist struct {
-	id     string
-	movies []Movies
+	Movies []Movie
 }
 
 type User struct {
-	id        string
 	Watchlist Watchlist
 }
 
@@ -40,43 +38,27 @@ type Session struct {
 	friend User
 }
 
-func algorithm(user User, friend User) {
-	var sharedList []Movies
-	sharedInd := 0
+type AlgorithmHelper struct {
+	db *dbx.DB
+}
 
-	//Step 1 find all common movies
-	//go over all Movies in user's watchlist
-	for i := 0; i < len(user.Watchlist.movies); i++ {
-		userMovie := user.Watchlist.movies[i].id
-		//check for that Movie in friends watchlist
-		for j := 0; j < len(friend.Watchlist.movies); j++ {
-			friendMovie := friend.Watchlist.movies[j].id
-			if userMovie == friendMovie {
-				sharedList[sharedInd] = user.Watchlist.movies[i]
-			}
-		}
-	}
+func (a *AlgorithmHelper) algorithm(user User, friend User) []Movie {
+	// var sharedList []Movie
 
-	//Step 2A iterate through List and find out List of favourite Genres
+	// //Step 1 find all common movies
+	// //go over all Movies in user's watchlist
 
-	/* 	var genres = make(map[string]int)
-
-	   	for _, movie := range sharedList {
-	   		split := strings.Split(movie.genres, ",")
-
-	   		for _, genre := range split {
-	   			genres[strings.TrimSpace(genre)]++
-	   		}
-	   	} */
+	// for _, movie := range user.Watchlist.Movies {
+	// 	for _, friendMovie := range friend.Watchlist.Movies {
+	// 		if movie.ID == friendMovie.ID {
+	// 			sharedList = append(sharedList, movie)
+	// 		}
+	// 	}
+	// }
 
 	//Step 2B get seperate favourite Genres from both friends
-
 	userGenreList := getFavouriteGenres(user)
 	friendGenreList := getFavouriteGenres(friend)
-
-	fmt.Printf("%#v", userGenreList)
-	fmt.Printf("---------------------\n")
-	fmt.Printf("%#v", friendGenreList)
 
 	//Step 3B find compromise between both Lists
 	commonScoreMap := make(map[string]int)
@@ -86,54 +68,123 @@ func algorithm(user User, friend User) {
 	}
 
 	keys := make([]string, 0, len(commonScoreMap))
-
 	for key := range commonScoreMap {
 		keys = append(keys, key)
 	}
 
-	//sort from low to high -> Map sorted by importance of Genre
-
+	//sort from low to high -> keys sorted by importance of Genre
 	sort.SliceStable(keys, func(i, j int) bool {
 		return commonScoreMap[keys[i]] < commonScoreMap[keys[j]]
 	})
 
 	//Step 4B determine List of Movies according to Genre Importance
-
+	// map[genre]rating, with higher rating being better
 	actualScoreMap := make(map[string]int)
-
 	for i := 0; i < len(commonScoreMap); i++ {
-		actualScoreMap[keys[i]] = len(commonScoreMap) + commonScoreMap[keys[i]]
+		actualScoreMap[keys[i]] = len(commonScoreMap) - commonScoreMap[keys[i]]
 	}
 
 	fmt.Printf("---------------------\n")
 	fmt.Printf("%#v", actualScoreMap)
 
-	var result []Movies = make([]Movies, 0, len(actualScoreMap))
+	var result []Movie = make([]Movie, 0, len(actualScoreMap))
 
-	for i := 0; i < len(actualScoreMap); i++ {
+	actualKeys := make([]string, 0, len(commonScoreMap))
 
+	for actualKey := range commonScoreMap {
+		actualKeys = append(actualKeys, actualKey)
 	}
 
-	_ = result
+	for i := 0; i < len(actualScoreMap); i++ {
+		result = append(result, a.getTen(actualKeys[i])...)
+	}
+
+	//result holds all the Movies now we need to sort them
+
+	var endResult []Movie
+
+	movieScoreMap := make(map[Movie]int)
+
+	for i := 0; i < len(result); i++ {
+		movieScoreMap[result[i]] = getScore(result[i], actualScoreMap)
+	}
+
+	movieKeys := make([]Movie, 0, len(result))
+
+	for movieKey := range movieScoreMap {
+		movieKeys = append(movieKeys, movieKey)
+	}
+
+	sort.SliceStable(movieKeys, func(i, j int) bool {
+		return movieScoreMap[movieKeys[i]] < movieScoreMap[movieKeys[j]]
+	})
+
+	var limit = len(movieKeys)
+	if limit > 10 {
+		limit = 10
+	}
+	for i := 0; i < limit; i++ {
+		endResult = append(endResult, movieKeys[i])
+	}
+
+	return endResult
 
 }
 
-// returns sorted List of fav genres
-func getFavouriteGenres(user User) []string {
-	var favGenres []string
+func getScore(movie Movie, actualScore map[string]int) int {
 
+	score := 0
+
+	split := strings.Split(movie.Genres, ",")
+
+	for i := 0; i < len(split); i++ {
+		score += actualScore[strings.TrimSpace(split[i])]
+	}
+
+	return score
+}
+
+func (a *AlgorithmHelper) getTen(genre string) (result []Movie) {
+	// Yep that's an SQL injection
+	rows, err := a.db.NewQuery(`
+		Select m.id, m.title, m.banners, m.posters, m.url, m.genres, m.year
+		From movies m
+		Where m.genres LIKE '%` + genre + `%'
+		and m.id NOT IN (Select m.id From movies m, watchlist w, user u Where u.id = w.user_id and w.movie_id = m.id)
+		Limit 10
+		ORDER BY RAND()
+	`).Bind(dbx.Params{
+		"genre": genre,
+	}).Rows()
+	if err != nil {
+		return nil
+	}
+
+	for rows.Next() {
+		var movie Movie
+		err = rows.Scan(&movie.ID, &movie.Title, &movie.Banners, &movie.Posters, &movie.Url, &movie.Genres, &movie.Year)
+		if err != nil {
+			return nil
+		}
+		result = append(result, movie)
+	}
+
+	return result
+}
+
+// returns sorted List of fav genres, first element is most favourite
+func getFavouriteGenres(user User) []string {
 	var genres = make(map[string]int)
 
-	for i := 0; i < len(user.Watchlist.movies); i++ {
-		split := strings.Split(user.Watchlist.movies[i].genres, ",")
+	for i := 0; i < len(user.Watchlist.Movies); i++ {
+		split := strings.Split(user.Watchlist.Movies[i].Genres, ",")
 
 		for j := 0; j < len(split); j++ {
 			genres[strings.TrimSpace(split[j])]++
 		}
 	}
 
-	keys := make([]string, 0, len(genres))
-
+	keys := []string{}
 	for key := range genres {
 		keys = append(keys, key)
 	}
@@ -142,10 +193,7 @@ func getFavouriteGenres(user User) []string {
 		return genres[keys[i]] > genres[keys[j]]
 	})
 
-	favGenres = keys
-
-	return favGenres
-
+	return keys
 }
 
 func indexOf(element string, data []string) int {
@@ -176,15 +224,81 @@ func main() {
 				}
 
 				// Insert this as partner in the session
-				_, err := app.DB().NewQuery("Update sessions Set partner = {:partner} Where id = {:id}").Bind(dbx.Params{
+				res, err := app.DB().NewQuery("Update sessions Set partner = {:partner} Where id = {:id}").Bind(dbx.Params{
 					"id":      id,
 					"partner": authRecord.BaseModel.Id,
 				}).Execute()
 				if err != nil {
 					return err
 				}
+				count, err := res.RowsAffected()
+				if count == 0 || err != nil {
+					return apis.NewNotFoundError("Session not found", nil)
+				}
 
-				return c.JSON(http.StatusOK, map[string]interface{}{})
+				var sessionCreatorID, sessionPartnerID string
+				err = app.DB().NewQuery("Select creator, partner From sessions Where id = {:id}").Bind(dbx.Params{
+					"id": id,
+				}).Row(&sessionCreatorID, &sessionPartnerID)
+				if err != nil {
+					return err
+				}
+
+				// Fetch both users watchlist
+				var creatorWatchlist []Movie
+				rows, err := app.DB().NewQuery("Select m.id, m.title, m.banners, m.posters, m.url, m.genres, m.year From movies m, watchlist w Where user = {:user} and m.id = w.movie").Bind(dbx.Params{
+					"user": sessionCreatorID,
+				}).Rows()
+				if err != nil {
+					return err
+				}
+
+				for rows.Next() {
+					var movie Movie
+					err = rows.Scan(&movie.ID, &movie.Title, &movie.Banners, &movie.Posters, &movie.Url, &movie.Genres, &movie.Year)
+					if err != nil {
+						return err
+					}
+					creatorWatchlist = append(creatorWatchlist, movie)
+				}
+
+				var partnerWatchlist []Movie
+				rows, err = app.DB().NewQuery("Select m.id, m.title, m.banners, m.posters, m.url, m.genres, m.year From movies m, watchlist w Where user = {:user} and m.id = w.movie").Bind(dbx.Params{
+					"user": sessionPartnerID,
+				}).Rows()
+				if err != nil {
+					return err
+				}
+
+				for rows.Next() {
+					var movie Movie
+					err = rows.Scan(&movie.ID, &movie.Title, &movie.Banners, &movie.Posters, &movie.Url, &movie.Genres, &movie.Year)
+					if err != nil {
+						return err
+					}
+					partnerWatchlist = append(partnerWatchlist, movie)
+				}
+
+				var a = &AlgorithmHelper{
+					db: app.DB(),
+				}
+
+				recommendation := a.algorithm(
+					User{
+						Watchlist: Watchlist{
+							Movies: creatorWatchlist,
+						},
+					},
+					User{
+						Watchlist: Watchlist{
+							Movies: partnerWatchlist,
+						},
+					},
+				)
+
+				return c.JSON(http.StatusOK, map[string]interface{}{
+					"recommendation": recommendation,
+				})
 			},
 			Middlewares: []echo.MiddlewareFunc{
 				apis.ActivityLogger(app),
@@ -194,92 +308,95 @@ func main() {
 		return nil
 	})
 
-	var movies = []Movies{
+	var movies = []Movie{
 		{
-			id:      "1",
-			title:   "The Shawshank Redemption",
-			banners: "https://image.tmdb.org/t/p/w1280/9O7gLzmreU0nGkIB6K3BsJbzvNv.jpg",
-			year:    "1994",
-			posters: "https://image.tmdb.org/t/p/w500/q6y0Go1tsGEsmtFryDOJo3dEmqu.jpg",
-			url:     "https://www.themoviedb.org/movie/278",
-			genres:  "Drama",
+			ID:      "1",
+			Title:   "The Shawshank Redemption",
+			Banners: "https://image.tmdb.org/t/p/w1280/9O7gLzmreU0nGkIB6K3BsJbzvNv.jpg",
+			Year:    "1994",
+			Posters: "https://image.tmdb.org/t/p/w500/q6y0Go1tsGEsmtFryDOJo3dEmqu.jpg",
+			Url:     "https://www.themoviedb.org/movie/278",
+			Genres:  "Drama",
 		},
 		{
-			id:      "2",
-			title:   "The Godfather",
-			banners: "https://image.tmdb.org/t/p/w1280/rPdtLWNsZmAtoZl9PK7S2wE3qiS.jpg",
-			year:    "1972",
-			posters: "https://image.tmdb.org/t/p/w500/rPdtLWNsZmAtoZl9PK7S2wE3qiS.jpg",
-			url:     "https://www.themoviedb.org/movie/238",
-			genres:  "Crime, Drama",
+			ID:      "2",
+			Title:   "The Godfather",
+			Banners: "https://image.tmdb.org/t/p/w1280/rPdtLWNsZmAtoZl9PK7S2wE3qiS.jpg",
+			Year:    "1972",
+			Posters: "https://image.tmdb.org/t/p/w500/rPdtLWNsZmAtoZl9PK7S2wE3qiS.jpg",
+			Url:     "https://www.themoviedb.org/movie/238",
+			Genres:  "Crime, Drama",
 		},
 		{
-			id:      "3",
-			title:   "The Godfather: Part II",
-			banners: "https://image.tmdb.org/t/p/w1280/3bhkrj58Vtu7enYsRolD1fZdja1.jpg",
-			year:    "1974",
-			posters: "https://image.tmdb.org/t/p/w500/3bhkrj58Vtu7enYsRolD1fZdja1.jpg",
-			url:     "https://www.themoviedb.org/movie/240",
-			genres:  "Crime, Drama",
+			ID:      "3",
+			Title:   "The Godfather: Part II",
+			Banners: "https://image.tmdb.org/t/p/w1280/3bhkrj58Vtu7enYsRolD1fZdja1.jpg",
+			Year:    "1974",
+			Posters: "https://image.tmdb.org/t/p/w500/3bhkrj58Vtu7enYsRolD1fZdja1.jpg",
+			Url:     "https://www.themoviedb.org/movie/240",
+			Genres:  "Crime, Drama",
 		},
 		{
-			id:      "4",
-			title:   "The Dark Knight",
-			banners: "https://image.tmdb.org/t/p/w1280/1hRoyzDtpgMU7Dz4JF22RANzQO7.jpg",
-			year:    "2008",
-			posters: "https://image.tmdb.org/t/p/w500/qJ2tW6WMUDux911r6m7haRef0WH.jpg",
-			url:     "https://www.themoviedb.org/movie/155",
-			genres:  "Drama, Crime",
+			ID:      "4",
+			Title:   "The Dark Knight",
+			Banners: "https://image.tmdb.org/t/p/w1280/1hRoyzDtpgMU7Dz4JF22RANzQO7.jpg",
+			Year:    "2008",
+			Posters: "https://image.tmdb.org/t/p/w500/qJ2tW6WMUDux911r6m7haRef0WH.jpg",
+			Url:     "https://www.themoviedb.org/movie/155",
+			Genres:  "Drama, Crime",
 		},
 	}
 
-	var movies2 = []Movies{
+	var movies2 = []Movie{
 		{
-			id:      "5",
-			title:   "12 Angry Dogs",
-			banners: "https://image.tmdb.org/t/p/w1280/3W0v956XxSG5xgm7LB6qu8ExYJ2.jpg",
-			year:    "1957",
-			posters: "https://image.tmdb.org/t/p/w500/3W0v956XxSG5xgm7LB6qu8ExYJ2.jpg",
-			url:     "https://www.themoviedb.org/movie/278",
-			genres:  "Drama",
+			ID:      "5",
+			Title:   "12 Angry Dogs",
+			Banners: "https://image.tmdb.org/t/p/w1280/3W0v956XxSG5xgm7LB6qu8ExYJ2.jpg",
+			Year:    "1957",
+			Posters: "https://image.tmdb.org/t/p/w500/3W0v956XxSG5xgm7LB6qu8ExYJ2.jpg",
+			Url:     "https://www.themoviedb.org/movie/278",
+			Genres:  "Drama",
 		},
 		{
-			id:      "6",
-			title:   "The Godfather: Part III",
-			banners: "https://image.tmdb.org/t/p/w1280/3bhkrj58Vtu7enYsRolD1fZdja1.jpg",
-			year:    "1990",
-			posters: "https://image.tmdb.org/t/p/w500/3bhkrj58Vtu7enYsRolD1fZdja1.jpg",
-			url:     "https://www.themoviedb.org/movie/240",
-			genres:  "Crime, Drama",
+			ID:      "6",
+			Title:   "The Godfather: Part III",
+			Banners: "https://image.tmdb.org/t/p/w1280/3bhkrj58Vtu7enYsRolD1fZdja1.jpg",
+			Year:    "1990",
+			Posters: "https://image.tmdb.org/t/p/w500/3bhkrj58Vtu7enYsRolD1fZdja1.jpg",
+			Url:     "https://www.themoviedb.org/movie/240",
+			Genres:  "Crime, Drama",
 		},
 		{
-			id:      "7",
-			title:   "The Dark Knight Rises",
-			banners: "https://image.tmdb.org/t/p/w1280/1hRoyzDtpgMU7Dz4JF22RANzQO7.jpg",
-			year:    "2012",
-			posters: "https://image.tmdb.org/t/p/w500/qJ2tW6WMUDux911r6m7haRef0WH.jpg",
-			url:     "https://www.themoviedb.org/movie/155",
-			genres:  "Drama, Crime",
+			ID:      "7",
+			Title:   "The Dark Knight Rises",
+			Banners: "https://image.tmdb.org/t/p/w1280/1hRoyzDtpgMU7Dz4JF22RANzQO7.jpg",
+			Year:    "2012",
+			Posters: "https://image.tmdb.org/t/p/w500/qJ2tW6WMUDux911r6m7haRef0WH.jpg",
+			Url:     "https://www.themoviedb.org/movie/155",
+			Genres:  "Drama, Crime",
 		},
 	}
 
 	var watchlist = []Watchlist{
 		{
-			id:     "20",
-			movies: movies,
+			Movies: movies,
 		},
 		{
-			id:     "21",
-			movies: movies2,
+			Movies: movies2,
 		},
 	}
 
-	var user1 = User{"30", watchlist[0]}
-	var user2 = User{"31", watchlist[1]}
+	var user1 = User{watchlist[0]}
+	var user2 = User{watchlist[1]}
 
 	var session = Session{user1, user2}
 
-	algorithm(session.user, session.friend)
+	helper := &AlgorithmHelper{
+		db: app.DB(),
+	}
+	// helper.algorithm(session.user, session.friend)
+	_ = helper
+	_ = session
 
 	if err := app.Start(); err != nil {
 		log.Fatal(err)
