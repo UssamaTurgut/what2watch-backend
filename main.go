@@ -103,8 +103,8 @@ func (a *AlgorithmHelper) algorithm(user User, friend User) []Movie {
 	})
 
 	var limit = len(movieKeys)
-	if limit > 10 {
-		limit = 10
+	if limit > 8 {
+		limit = 8
 	}
 	for i := 0; i < limit; i++ {
 		endResult = append(endResult, movieKeys[i])
