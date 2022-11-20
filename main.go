@@ -145,18 +145,14 @@ func getScore(movie Movie, actualScore map[string]int) int {
 }
 
 func (a *AlgorithmHelper) getTen(genre string) (result []Movie) {
-	// Yep that's an SQL injection
-	rows, err := a.db.NewQuery(`
-		Select m.id, m.title, m.banners, m.posters, m.url, m.genres, m.year
-		From movies m
-		Where m.genres LIKE '%` + genre + `%'
-		and m.id NOT IN (Select m.id From movies m, watchlist w, user u Where u.id = w.user_id and w.movie_id = m.id)
-		Limit 10
-		ORDER BY RAND()
-	`).Bind(dbx.Params{
-		"genre": genre,
-	}).Rows()
+	rows, err := a.db.Select(
+		"m.id", "m.title", "m.banners", "m.posters", "m.url", "m.genres", "m.year",
+	).From("movies m").Where(dbx.Like(
+		"m.genres",
+		genre,
+	)).OrderBy("RANDOM()").Limit(10).Rows()
 	if err != nil {
+		log.Println(err)
 		return nil
 	}
 
