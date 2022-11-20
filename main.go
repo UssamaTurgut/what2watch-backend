@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
 	"log"
 	"net/http"
@@ -33,29 +34,11 @@ type User struct {
 	Watchlist Watchlist
 }
 
-type Session struct {
-	user   User
-	friend User
-}
-
 type AlgorithmHelper struct {
 	db *dbx.DB
 }
 
 func (a *AlgorithmHelper) algorithm(user User, friend User) []Movie {
-	// var sharedList []Movie
-
-	// //Step 1 find all common movies
-	// //go over all Movies in user's watchlist
-
-	// for _, movie := range user.Watchlist.Movies {
-	// 	for _, friendMovie := range friend.Watchlist.Movies {
-	// 		if movie.ID == friendMovie.ID {
-	// 			sharedList = append(sharedList, movie)
-	// 		}
-	// 	}
-	// }
-
 	//Step 2B get seperate favourite Genres from both friends
 	userGenreList := getFavouriteGenres(user)
 	friendGenreList := getFavouriteGenres(friend)
@@ -128,13 +111,10 @@ func (a *AlgorithmHelper) algorithm(user User, friend User) []Movie {
 	}
 
 	return endResult
-
 }
 
 func getScore(movie Movie, actualScore map[string]int) int {
-
 	score := 0
-
 	split := strings.Split(movie.Genres, ",")
 
 	for i := 0; i < len(split); i++ {
@@ -205,6 +185,7 @@ func indexOf(element string, data []string) int {
 
 func main() {
 	app := pocketbase.New()
+
 	app.OnBeforeServe().Add(func(e *core.ServeEvent) error {
 		// add new "GET /hello" route to the app router (echo)
 		e.Router.AddRoute(echo.Route{
@@ -219,6 +200,34 @@ func main() {
 					return apis.NewForbiddenError("Only auth records can access this endpoint", nil)
 				}
 
+				var sessionCreatorID string
+				var sessionPartnerID sql.NullString
+				err := app.DB().NewQuery("Select creator, partner From sessions Where id = {:id}").Bind(dbx.Params{
+					"id": id,
+				}).Row(&sessionCreatorID, &sessionPartnerID)
+				if err != nil {
+					return err
+				}
+				if sessionCreatorID == authRecord.BaseModel.Id {
+					return c.JSON(http.StatusOK, map[string]interface{}{
+						"role": "creator",
+					})
+				}
+
+				// If session already has recommendations, we stop here
+				var i int
+				err = app.DB().Select("count(session)").From("recommendations").Where(dbx.HashExp{
+					"session": id,
+				}).Row(&i)
+				if err != nil {
+					return err
+				}
+				if i > 0 {
+					return c.JSON(http.StatusOK, map[string]interface{}{
+						"role": "partner",
+					})
+				}
+
 				// Insert this as partner in the session
 				res, err := app.DB().NewQuery("Update sessions Set partner = {:partner} Where id = {:id}").Bind(dbx.Params{
 					"id":      id,
@@ -230,14 +239,6 @@ func main() {
 				count, err := res.RowsAffected()
 				if count == 0 || err != nil {
 					return apis.NewNotFoundError("Session not found", nil)
-				}
-
-				var sessionCreatorID, sessionPartnerID string
-				err = app.DB().NewQuery("Select creator, partner From sessions Where id = {:id}").Bind(dbx.Params{
-					"id": id,
-				}).Row(&sessionCreatorID, &sessionPartnerID)
-				if err != nil {
-					return err
 				}
 
 				// Fetch both users watchlist
@@ -292,8 +293,19 @@ func main() {
 					},
 				)
 
+				for _, movie := range recommendation {
+					_, err = app.DB().NewQuery("Insert Into recommendations (session, movie) Values ({:session}, {:movie})").Bind(dbx.Params{
+						"session": id,
+						"movie":   movie.ID,
+					}).Execute()
+					if err != nil {
+						return err
+					}
+				}
+
 				return c.JSON(http.StatusOK, map[string]interface{}{
-					"recommendation": recommendation,
+					"role":            "partner",
+					"recommendations": recommendation,
 				})
 			},
 			Middlewares: []echo.MiddlewareFunc{
@@ -303,96 +315,6 @@ func main() {
 
 		return nil
 	})
-
-	var movies = []Movie{
-		{
-			ID:      "1",
-			Title:   "The Shawshank Redemption",
-			Banners: "https://image.tmdb.org/t/p/w1280/9O7gLzmreU0nGkIB6K3BsJbzvNv.jpg",
-			Year:    "1994",
-			Posters: "https://image.tmdb.org/t/p/w500/q6y0Go1tsGEsmtFryDOJo3dEmqu.jpg",
-			Url:     "https://www.themoviedb.org/movie/278",
-			Genres:  "Drama",
-		},
-		{
-			ID:      "2",
-			Title:   "The Godfather",
-			Banners: "https://image.tmdb.org/t/p/w1280/rPdtLWNsZmAtoZl9PK7S2wE3qiS.jpg",
-			Year:    "1972",
-			Posters: "https://image.tmdb.org/t/p/w500/rPdtLWNsZmAtoZl9PK7S2wE3qiS.jpg",
-			Url:     "https://www.themoviedb.org/movie/238",
-			Genres:  "Crime, Drama",
-		},
-		{
-			ID:      "3",
-			Title:   "The Godfather: Part II",
-			Banners: "https://image.tmdb.org/t/p/w1280/3bhkrj58Vtu7enYsRolD1fZdja1.jpg",
-			Year:    "1974",
-			Posters: "https://image.tmdb.org/t/p/w500/3bhkrj58Vtu7enYsRolD1fZdja1.jpg",
-			Url:     "https://www.themoviedb.org/movie/240",
-			Genres:  "Crime, Drama",
-		},
-		{
-			ID:      "4",
-			Title:   "The Dark Knight",
-			Banners: "https://image.tmdb.org/t/p/w1280/1hRoyzDtpgMU7Dz4JF22RANzQO7.jpg",
-			Year:    "2008",
-			Posters: "https://image.tmdb.org/t/p/w500/qJ2tW6WMUDux911r6m7haRef0WH.jpg",
-			Url:     "https://www.themoviedb.org/movie/155",
-			Genres:  "Drama, Crime",
-		},
-	}
-
-	var movies2 = []Movie{
-		{
-			ID:      "5",
-			Title:   "12 Angry Dogs",
-			Banners: "https://image.tmdb.org/t/p/w1280/3W0v956XxSG5xgm7LB6qu8ExYJ2.jpg",
-			Year:    "1957",
-			Posters: "https://image.tmdb.org/t/p/w500/3W0v956XxSG5xgm7LB6qu8ExYJ2.jpg",
-			Url:     "https://www.themoviedb.org/movie/278",
-			Genres:  "Drama",
-		},
-		{
-			ID:      "6",
-			Title:   "The Godfather: Part III",
-			Banners: "https://image.tmdb.org/t/p/w1280/3bhkrj58Vtu7enYsRolD1fZdja1.jpg",
-			Year:    "1990",
-			Posters: "https://image.tmdb.org/t/p/w500/3bhkrj58Vtu7enYsRolD1fZdja1.jpg",
-			Url:     "https://www.themoviedb.org/movie/240",
-			Genres:  "Crime, Drama",
-		},
-		{
-			ID:      "7",
-			Title:   "The Dark Knight Rises",
-			Banners: "https://image.tmdb.org/t/p/w1280/1hRoyzDtpgMU7Dz4JF22RANzQO7.jpg",
-			Year:    "2012",
-			Posters: "https://image.tmdb.org/t/p/w500/qJ2tW6WMUDux911r6m7haRef0WH.jpg",
-			Url:     "https://www.themoviedb.org/movie/155",
-			Genres:  "Drama, Crime",
-		},
-	}
-
-	var watchlist = []Watchlist{
-		{
-			Movies: movies,
-		},
-		{
-			Movies: movies2,
-		},
-	}
-
-	var user1 = User{watchlist[0]}
-	var user2 = User{watchlist[1]}
-
-	var session = Session{user1, user2}
-
-	helper := &AlgorithmHelper{
-		db: app.DB(),
-	}
-	// helper.algorithm(session.user, session.friend)
-	_ = helper
-	_ = session
 
 	if err := app.Start(); err != nil {
 		log.Fatal(err)
